@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { View, Text, TextInput, TouchableOpacity, StyleSheet, ScrollView, Alert } from 'react-native';
 import { useRouter } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { ArrowLeft, Eye, EyeOff, CircleAlert as AlertCircle, CheckCircle, Info } from 'lucide-react-native';
+import { ArrowLeft, Eye, EyeOff, CircleAlert as AlertCircle, CircleCheck as CheckCircle, Info } from 'lucide-react-native';
 import { useAuth } from '@/contexts/AuthContext';
 
 export default function RegisterScreen() {
