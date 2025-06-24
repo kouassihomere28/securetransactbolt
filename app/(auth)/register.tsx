@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { View, Text, TextInput, TouchableOpacity, StyleSheet, ScrollView, Alert } from 'react-native';
 import { useRouter } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { ArrowLeft, Eye, EyeOff, CircleAlert as AlertCircle } from 'lucide-react-native';
+import { ArrowLeft, Eye, EyeOff, CircleAlert as AlertCircle, CheckCircle, Info } from 'lucide-react-native';
 import { useAuth } from '@/contexts/AuthContext';
 
 export default function RegisterScreen() {
@@ -18,8 +18,27 @@ export default function RegisterScreen() {
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [errors, setErrors] = useState<{[key: string]: string}>({});
+  const [serverStatus, setServerStatus] = useState<'checking' | 'connected' | 'disconnected'>('checking');
   const router = useRouter();
   const { register } = useAuth();
+
+  // Vérifier le statut du serveur au chargement
+  React.useEffect(() => {
+    checkServerStatus();
+  }, []);
+
+  const checkServerStatus = async () => {
+    try {
+      const response = await fetch('http://0.0.0.0:5000/api/health');
+      if (response.ok) {
+        setServerStatus('connected');
+      } else {
+        setServerStatus('disconnected');
+      }
+    } catch (error) {
+      setServerStatus('disconnected');
+    }
+  };
 
   const updateFormData = <K extends keyof typeof formData>(key: K, value: typeof formData[K]) => {
     setFormData(prev => ({ ...prev, [key]: value }));
@@ -63,6 +82,19 @@ export default function RegisterScreen() {
       return;
     }
 
+    // Vérifier le statut du serveur avant de continuer
+    if (serverStatus === 'disconnected') {
+      Alert.alert(
+        'Serveur non disponible',
+        'Le serveur n\'est pas accessible. Veuillez vérifier que le serveur est démarré et réessayer.',
+        [
+          { text: 'Réessayer', onPress: () => checkServerStatus() },
+          { text: 'Annuler', style: 'cancel' }
+        ]
+      );
+      return;
+    }
+
     setIsLoading(true);
     setErrors({});
     
@@ -98,13 +130,22 @@ export default function RegisterScreen() {
       
       let errorMessage = error.message || 'Une erreur est survenue lors de la création du compte';
       
-      // Gestion des erreurs spécifiques
+      // Gestion des erreurs spécifiques avec des messages plus clairs
       if (errorMessage.includes('email existe déjà')) {
         setErrors({ email: 'Un compte avec cet email existe déjà' });
       } else if (errorMessage.includes('serveur')) {
-        setErrors({ general: 'Problème de connexion au serveur. Vérifiez que le serveur est démarré.' });
-      } else if (errorMessage.includes('base de données')) {
-        setErrors({ general: 'Problème de base de données. Vérifiez la configuration PostgreSQL.' });
+        setErrors({ 
+          general: 'Problème de connexion au serveur. Vérifiez que le serveur est démarré sur le port 5000.' 
+        });
+      } else if (errorMessage.includes('base de données') || errorMessage.includes('PostgreSQL')) {
+        setErrors({ 
+          general: 'Base de données non disponible. Vérifiez que PostgreSQL est installé et configuré.' 
+        });
+      } else if (errorMessage.includes('Failed to fetch') || errorMessage.includes('fetch')) {
+        setErrors({ 
+          general: 'Impossible de se connecter au serveur. Vérifiez que le serveur backend est démarré.' 
+        });
+        setServerStatus('disconnected');
       } else {
         setErrors({ general: errorMessage });
       }
@@ -125,6 +166,39 @@ export default function RegisterScreen() {
     return null;
   };
 
+  const renderServerStatus = () => {
+    if (serverStatus === 'checking') {
+      return (
+        <View style={styles.statusContainer}>
+          <Info color="#6B7280" size={16} />
+          <Text style={styles.statusText}>Vérification du serveur...</Text>
+        </View>
+      );
+    } else if (serverStatus === 'disconnected') {
+      return (
+        <View style={[styles.statusContainer, styles.errorStatus]}>
+          <AlertCircle color="#EF4444" size={16} />
+          <Text style={styles.statusErrorText}>
+            Serveur non accessible. Vérifiez que le serveur backend est démarré.
+          </Text>
+          <TouchableOpacity 
+            style={styles.retryButton}
+            onPress={checkServerStatus}
+          >
+            <Text style={styles.retryButtonText}>Réessayer</Text>
+          </TouchableOpacity>
+        </View>
+      );
+    } else {
+      return (
+        <View style={[styles.statusContainer, styles.successStatus]}>
+          <CheckCircle color="#10B981" size={16} />
+          <Text style={styles.statusSuccessText}>Serveur connecté</Text>
+        </View>
+      );
+    }
+  };
+
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.header}>
@@ -139,6 +213,8 @@ export default function RegisterScreen() {
 
       <ScrollView style={styles.scrollView} showsVerticalScrollIndicator={false}>
         <View style={styles.form}>
+          {renderServerStatus()}
+
           {errors.general && (
             <View style={styles.generalErrorContainer}>
               <AlertCircle color="#EF4444" size={20} />
@@ -270,9 +346,12 @@ export default function RegisterScreen() {
           </View>
 
           <TouchableOpacity 
-            style={[styles.registerButton, isLoading && styles.registerButtonDisabled]}
+            style={[
+              styles.registerButton, 
+              (isLoading || serverStatus === 'disconnected') && styles.registerButtonDisabled
+            ]}
             onPress={handleRegister}
-            disabled={isLoading}
+            disabled={isLoading || serverStatus === 'disconnected'}
           >
             <Text style={styles.registerButtonText}>
               {isLoading ? 'Création...' : 'Créer mon compte'}
@@ -320,6 +399,52 @@ const styles = StyleSheet.create({
     paddingHorizontal: 24,
     paddingTop: 24,
     paddingBottom: 32,
+  },
+  statusContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F3F4F6',
+    padding: 12,
+    borderRadius: 8,
+    marginBottom: 24,
+  },
+  successStatus: {
+    backgroundColor: '#D1FAE5',
+  },
+  errorStatus: {
+    backgroundColor: '#FEE2E2',
+  },
+  statusText: {
+    fontSize: 14,
+    fontFamily: 'Inter-Medium',
+    color: '#6B7280',
+    marginLeft: 8,
+    flex: 1,
+  },
+  statusSuccessText: {
+    fontSize: 14,
+    fontFamily: 'Inter-Medium',
+    color: '#059669',
+    marginLeft: 8,
+    flex: 1,
+  },
+  statusErrorText: {
+    fontSize: 14,
+    fontFamily: 'Inter-Medium',
+    color: '#DC2626',
+    marginLeft: 8,
+    flex: 1,
+  },
+  retryButton: {
+    backgroundColor: '#EF4444',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 6,
+  },
+  retryButtonText: {
+    fontSize: 12,
+    fontFamily: 'Inter-SemiBold',
+    color: '#FFFFFF',
   },
   generalErrorContainer: {
     flexDirection: 'row',

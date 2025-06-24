@@ -3,7 +3,7 @@ import cors from 'cors';
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 import dotenv from 'dotenv';
-import pool from '../services/database';
+import pool, { initializeDatabase } from '../services/database';
 
 dotenv.config();
 
@@ -12,10 +12,28 @@ const PORT = process.env.PORT || 5000;
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
 
 app.use(cors({
-  origin: ['http://localhost:8081', 'http://localhost:3000', 'http://0.0.0.0:8081'],
+  origin: ['http://localhost:8081', 'http://localhost:3000', 'http://0.0.0.0:8081', 'http://127.0.0.1:8081'],
   credentials: true
 }));
 app.use(express.json());
+
+// Variable pour suivre l'état de la base de données
+let databaseReady = false;
+
+// Initialiser la base de données au démarrage
+const initDB = async () => {
+  try {
+    databaseReady = await initializeDatabase();
+    if (databaseReady) {
+      console.log('✅ Base de données prête');
+    } else {
+      console.log('⚠️ Base de données non disponible - mode dégradé');
+    }
+  } catch (error) {
+    console.error('❌ Erreur d\'initialisation:', error);
+    databaseReady = false;
+  }
+};
 
 // Middleware d'authentification
 const authenticateToken = (req: any, res: any, next: any) => {
@@ -38,6 +56,7 @@ app.get('/api/health', (req, res) => {
   res.json({ 
     status: 'OK', 
     message: 'Serveur API fonctionnel',
+    database: databaseReady ? 'Connected' : 'Disconnected',
     timestamp: new Date().toISOString()
   });
 });
@@ -45,26 +64,35 @@ app.get('/api/health', (req, res) => {
 // Route de test de la base de données
 app.get('/api/db-test', async (req, res) => {
   try {
+    if (!databaseReady) {
+      return res.status(503).json({ 
+        status: 'ERROR', 
+        message: 'Base de données non disponible',
+        suggestion: 'Vérifiez que PostgreSQL est installé et démarré'
+      });
+    }
+
     const result = await pool.query('SELECT NOW() as current_time');
     res.json({ 
       status: 'OK', 
       message: 'Base de données connectée',
       time: result.rows[0].current_time
     });
-  } catch (error) {
+  } catch (error: any) {
     console.error('Erreur de test DB:', error);
     res.status(500).json({ 
       status: 'ERROR', 
       message: 'Erreur de connexion à la base de données',
-      error: error.message
+      error: error.message,
+      suggestion: 'Vérifiez la configuration PostgreSQL'
     });
   }
 });
 
-// Route d'inscription
+// Route d'inscription avec gestion d'erreurs améliorée
 app.post('/api/auth/register', async (req, res) => {
   try {
-    console.log('📝 Tentative d\'inscription:', req.body);
+    console.log('📝 Tentative d\'inscription:', { email: req.body.email, name: req.body.name });
 
     const { email, password, name, phone, userType } = req.body;
 
@@ -73,7 +101,13 @@ app.post('/api/auth/register', async (req, res) => {
       console.log('❌ Données manquantes pour l\'inscription');
       return res.status(400).json({ 
         success: false,
-        error: 'Tous les champs obligatoires doivent être remplis' 
+        error: 'Tous les champs obligatoires doivent être remplis',
+        details: {
+          email: !email ? 'Email requis' : null,
+          password: !password ? 'Mot de passe requis' : null,
+          name: !name ? 'Nom requis' : null,
+          userType: !userType ? 'Type d\'utilisateur requis' : null
+        }
       });
     }
 
@@ -103,11 +137,13 @@ app.post('/api/auth/register', async (req, res) => {
     }
 
     // Vérification de la base de données
-    if (!pool) {
+    if (!databaseReady) {
       console.log('❌ Base de données non disponible');
-      return res.status(500).json({ 
+      return res.status(503).json({ 
         success: false,
-        error: 'Base de données non disponible. Veuillez configurer PostgreSQL.' 
+        error: 'Service temporairement indisponible',
+        details: 'Base de données non disponible. Veuillez réessayer plus tard.',
+        suggestion: 'Vérifiez que PostgreSQL est installé et configuré'
       });
     }
 
@@ -161,28 +197,37 @@ app.post('/api/auth/register', async (req, res) => {
       }
     });
 
-  } catch (error) {
+  } catch (error: any) {
     console.error('❌ Erreur lors de l\'inscription:', error);
 
     // Messages d'erreur plus spécifiques
     let errorMessage = 'Erreur serveur lors de la création du compte';
+    let suggestion = 'Veuillez réessayer plus tard';
 
     if (error.code === 'ECONNREFUSED') {
-      errorMessage = 'Base de données non disponible. Veuillez configurer PostgreSQL.';
+      errorMessage = 'Base de données non disponible';
+      suggestion = 'Vérifiez que PostgreSQL est installé et démarré';
     } else if (error.code === '23505') { // Violation de contrainte unique
       errorMessage = 'Un compte avec cet email existe déjà';
+      suggestion = 'Utilisez un autre email ou connectez-vous';
     } else if (error.code === '42P01') { // Table n'existe pas
-      errorMessage = 'Base de données non initialisée. Veuillez créer les tables.';
+      errorMessage = 'Base de données non initialisée';
+      suggestion = 'Contactez l\'administrateur système';
+    } else if (error.code === 'ENOTFOUND') {
+      errorMessage = 'Impossible de se connecter à la base de données';
+      suggestion = 'Vérifiez la configuration réseau';
     }
 
     res.status(500).json({ 
       success: false,
-      error: errorMessage 
+      error: errorMessage,
+      suggestion: suggestion,
+      code: error.code
     });
   }
 });
 
-// Route de connexion
+// Route de connexion avec gestion d'erreurs améliorée
 app.post('/api/auth/login', async (req, res) => {
   try {
     console.log('🔐 Tentative de connexion:', req.body.email);
@@ -198,11 +243,12 @@ app.post('/api/auth/login', async (req, res) => {
     }
 
     // Vérification de la base de données
-    if (!pool) {
+    if (!databaseReady) {
       console.log('❌ Base de données non disponible');
-      return res.status(500).json({ 
+      return res.status(503).json({ 
         success: false,
-        error: 'Base de données non disponible. Veuillez configurer PostgreSQL.' 
+        error: 'Service temporairement indisponible',
+        suggestion: 'Vérifiez que PostgreSQL est installé et configuré'
       });
     }
 
@@ -257,26 +303,30 @@ app.post('/api/auth/login', async (req, res) => {
       }
     });
 
-  } catch (error) {
+  } catch (error: any) {
     console.error('❌ Erreur lors de la connexion:', error);
 
     // Messages d'erreur plus spécifiques
     let errorMessage = 'Erreur serveur lors de la connexion';
+    let suggestion = 'Veuillez réessayer plus tard';
 
     if (error.code === 'ECONNREFUSED') {
-      errorMessage = 'Base de données non disponible. Veuillez configurer PostgreSQL.';
+      errorMessage = 'Base de données non disponible';
+      suggestion = 'Vérifiez que PostgreSQL est installé et démarré';
     } else if (error.code === '42P01') {
-      errorMessage = 'Base de données non initialisée. Veuillez créer les tables.';
+      errorMessage = 'Base de données non initialisée';
+      suggestion = 'Contactez l\'administrateur système';
     }
 
     res.status(500).json({ 
       success: false,
-      error: errorMessage 
+      error: errorMessage,
+      suggestion: suggestion
     });
   }
 });
 
-// Routes utilisateur
+// Routes utilisateur (inchangées)
 app.get('/api/users/:id', authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
@@ -334,7 +384,7 @@ app.put('/api/users/:id', authenticateToken, async (req, res) => {
   }
 });
 
-// Routes transactions
+// Routes transactions (inchangées)
 app.get('/api/transactions', authenticateToken, async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM transactions ORDER BY created_date DESC');
@@ -464,7 +514,7 @@ app.put('/api/transactions/:id/status', authenticateToken, async (req, res) => {
   }
 });
 
-// Routes messages
+// Routes messages (inchangées)
 app.get('/api/transactions/:id/messages', authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
@@ -511,12 +561,27 @@ app.post('/api/messages', authenticateToken, async (req, res) => {
   }
 });
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 Serveur API démarré sur http://0.0.0.0:${PORT}`);
-  console.log('📊 Mode: Base de données PostgreSQL');
-  console.log('🔗 Routes disponibles:');
-  console.log('  - GET  /api/health');
-  console.log('  - GET  /api/db-test');
-  console.log('  - POST /api/auth/register');
-  console.log('  - POST /api/auth/login');
-});
+// Démarrer le serveur et initialiser la base de données
+const startServer = async () => {
+  await initDB();
+  
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`🚀 Serveur API démarré sur http://0.0.0.0:${PORT}`);
+    console.log(`📊 Mode: ${databaseReady ? 'Base de données PostgreSQL' : 'Mode dégradé'}`);
+    console.log('🔗 Routes disponibles:');
+    console.log('  - GET  /api/health');
+    console.log('  - GET  /api/db-test');
+    console.log('  - POST /api/auth/register');
+    console.log('  - POST /api/auth/login');
+    
+    if (!databaseReady) {
+      console.log('\n⚠️  ATTENTION: Base de données non disponible');
+      console.log('   Pour résoudre ce problème:');
+      console.log('   1. Installez PostgreSQL');
+      console.log('   2. Créez une base de données "securetransact"');
+      console.log('   3. Configurez les variables d\'environnement');
+    }
+  });
+};
+
+startServer();
